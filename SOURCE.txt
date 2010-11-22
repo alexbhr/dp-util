@@ -1,0 +1,6 @@
+In order to run this utility, you would need to install the SOAP::Lite Perl from CPAN module.
+Recent Perl versions ship with a CPAN utility, so the following should be sufficient:
+
+# cpan -i SOAP::Lite
+
+It is also recommanded to install Net::SSLeay for HTTPS support.

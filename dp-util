@@ -1,0 +1,765 @@
+#!/usr/bin/perl
+#            o
+#        o o o o
+#            o o
+#          o o
+#              radware
+#
+# Copyright 2010 Radware Inc. All rights reserved.
+# Redistribution and use in source and binary forms, with or without modification, are
+# permitted provided that the following conditions are met:
+# 
+#    1. Redistributions of source code must retain the above copyright notice, this list of
+#       conditions and the following disclaimer.
+# 
+#    2. Redistributions in binary form must reproduce the above copyright notice, this list
+#       of conditions and the following disclaimer in the documentation and/or other materials
+#       provided with the distribution.
+# 
+# THIS SOFTWARE IS PROVIDED BY RADWARE INC ``AS IS'' AND ANY EXPRESS OR IMPLIED
+# WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+# FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL RADWARE INC OR
+# CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+# ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
+# NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+# ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+# 
+# The views and conclusions contained in the software and documentation are those of the
+# authors and should not be interpreted as representing official policies, either expressed
+# or implied, of Radware Inc.
+#
+# Alex Behar <alexbr@radware.com>
+# Yuri Gushin <yurig@radware.com>
+# $Id: dp-util 103 2010-11-22 18:23:19Z yuri $
+
+use warnings;
+use strict;
+use SOAP::Lite  on_fault => sub { 
+		 			my ($soap_req, $soap_res) = @_;
+                    die ref $soap_res ? $soap_res->faultstring : $soap_req->transport->status, "\n";
+				};
+
+usage() unless (defined $ARGV[0]);
+if ($ARGV[0] eq '-h') { usage() }
+
+my $proto = defined $ENV{RDWR_PROTO} ? $ENV{RDWR_PROTO} : "http";
+my $device = "$proto://" . (defined $ENV{RDWR_DEVICE} ? $ENV{RDWR_DEVICE} : die("Please specify a device in your environment first. See -h for more details.\n"));
+
+my $username = my $password = 'radware';
+if (defined $ENV{RDWR_USER} && defined $ENV{RDWR_PASSWORD}) {
+    $username = $ENV{RDWR_USER};
+    $password = $ENV{RDWR_PASSWORD};
+}
+
+my $soap_req;
+
+my $soap_obj = SOAP::Lite->proxy($device . "/soap" )->uri('');
+# Set the user/pass for the device and initialize us a SOAP object. 
+# This is too ugly.
+my $evalstr = "sub SOAP::Transport::HTTP::Client::get_basic_credentials { return $username => $password; }";
+eval ($evalstr);
+
+# for batch operations logic
+my $batch = 0;
+# GeoIP DB
+my %locations;
+
+sub get_networks () {
+
+    $soap_obj->uri('radware.Classes.Networks');
+    $soap_req = $soap_obj->getAll_Network();
+    my $response = $soap_req->result;
+    
+    # Networks are stored in a hash of arrays like so:
+    # my $networks = {
+    # 'any' => [
+    #           {
+    #            'Mask' => '255.255.255.255',
+    #            'Address' => '0.0.0.0',
+    #            'Index' => '0',
+    #            'FromIp' => '0.0.0.0',
+    #            'Mode' => 'IP Mask',
+    #            'ToIp' => '0.0.0.0'
+    #            }
+    #          ],
+    # };
+    my $networks = {};
+    foreach my $entry (@{$response}) {
+        my %network = %$entry;
+        push(@{$networks->{delete($network{'Name'})}}, \%network);
+    }
+    
+    return $networks;
+}
+
+sub get_index (@) {
+    my ($network, $network_object) = @_;
+    my $index = -1; 
+  
+    my $netdetails = parse_netobject($network_object);
+
+     if ($netdetails->{Mode} eq 'IP Mask') {
+        foreach my $net (@{$network}) {
+            if ($net->{Address} eq $netdetails->{Address} and $net->{Mask} eq $netdetails->{Mask}) {
+                $index = $net->{Index};
+                last;
+            }
+        }
+     } else {
+         foreach my $net (@{$network}) {
+            if ($net->{FromIp} eq $netdetails->{FromIp} and $net->{ToIp} eq $netdetails->{ToIp}) {
+                $index = $net->{Index};
+                last;
+            }
+        }
+    }
+    
+    return $index;
+}
+
+sub single_exit ($) {
+    my $code = shift;
+
+    if (!$batch) {
+        exit($code);
+    }
+}
+
+sub single_print ($) {
+    my $text = shift;
+
+    if (!$batch) {
+        print $text;
+    }
+}
+
+sub parse_netobject ($) {
+    my $network_object = shift;
+
+     # Support IP Mask and IP Range additions
+     #  1.2.3.0/255.255.255.0 and 1.2.3.1-1.2.3.3
+    my ($type, $address, $from, $to, $mask) = ('', '', '', '', '');
+
+    if ($network_object =~ /^((?:\d+\.){3}\d+)\s?-\s?((?:\d+\.){3}\d+)$/ or $network_object =~ /^([a-f0-9:]+)\s?-\s?([a-f0-9:]+)$/i) { 
+        $type = 'IP Range';
+        $from = $1;
+        $to = $2;
+    } elsif ($network_object =~ /^((?:\d+\.){3}\d+)\s?\/\s?([0-9.]+)$/ or $network_object =~ /^([a-f0-9:]+)\s?\/\s?([a-f0-9:]+)$/i) {
+        $type = 'IP Mask';
+        $address = $1;
+        $mask = $2;
+    } else {
+        die "Error parsing IP range/mask/CIDR '$network_object'.\n";
+    }
+
+    my $netdetails = {
+        'Mask' => $mask,
+        'Address' => $address,
+        'FromIp' => $from,
+        'Mode' => $type,
+        'ToIp' => $to,
+    };
+    
+    return $netdetails;
+}
+
+sub get_blacklists () {
+
+    $soap_obj->uri('radware.Security.AccessLists');
+    $soap_req = $soap_obj->getAll_BlackList();
+    my $response = $soap_req->result;
+    
+    my $blacklists = {};
+    foreach my $entry (@{$response}) {
+        my %blacklist = %$entry;
+        $blacklists->{(defined $blacklist{'Sourcenetwork'} ? delete($blacklist{'Sourcenetwork'}) : delete($blacklist{'Srcnetwork'}))} = \%blacklist;
+    }
+
+    return $blacklists;
+}
+
+sub get_whitelists () {
+
+    $soap_obj->uri('radware.Security.AccessLists');
+    $soap_req = $soap_obj->getAll_WhiteList();
+    my $response = $soap_req->result;
+
+    my $whitelists = {};
+    foreach my $entry (@{$response}) {
+        my %whitelist = %$entry;
+        $whitelists->{(defined $whitelist{'Sourcenetwork'} ? delete($whitelist{'Sourcenetwork'}) : delete($whitelist{'Srcnetwork'}))} = \%whitelist;
+    }
+
+    return $whitelists;
+}
+
+sub get_server_protections () {
+    
+    $soap_obj->uri('radware.Security.ServerProtection');
+    $soap_req = $soap_obj->getAll_IDSServerTable();
+    my $response = $soap_req->result;
+
+    my $server_protections = {};
+    foreach my $entry (@{$response}) {
+        my %list = %$entry;
+        $server_protections->{delete($list{Name})} = \%list;
+    }
+
+    return $server_protections;
+
+}
+
+sub print_network ($) {
+    my $network = shift;
+    foreach my $net (@{$network}) {
+        my $buf;
+        if ($net->{Mode} =~ /Mask/) {
+            $buf = " Mask: $net->{Address}/$net->{Mask}";
+        } else {
+            $buf = "Range: $net->{FromIp}-$net->{ToIp}";
+        }
+        printf("\t%-70s%-40s\n", $buf, "index: $net->{Index}");
+    }
+}
+
+sub list_blacklists () {
+    my $black_lists = get_blacklists();
+    my $networks = get_networks();
+    
+    foreach my $bl (keys %{$black_lists}) {
+        my $bl_net = $networks->{$bl};
+        print "Blacklist policy: $bl\n";
+        print_network($bl_net);
+    }
+}
+
+sub list_whitelists () {
+    my $white_lists = get_whitelists();
+    my $networks = get_networks();
+    foreach my $wl (keys %{$white_lists}) {
+        my $wl_net = $networks->{$wl};
+        print "Whitelist policy: $wl\n";
+        print_network($wl_net);
+    }
+}
+
+sub load_locations () {
+    my $buffering = $|;
+    
+    $| = 1;
+    print "Reading GeoIP DB... ";
+    open(GEOFD, '<geoip.db') or die("Cannot open geoip.db: $!");
+    
+    while (my $line = <GEOFD>) {
+        # Parser saves the IPv4/6 range and country name (ISO + full)
+        # parsing structure: "1.21.0.0","1.21.255.255","18153472","18219007","JP","Japan"
+        if ($line =~/^\"([\d.:a-f]+)\",.*\"([\d.:a-f]+)\",.+,.+,.*\"([\w]{2})\",.*\"(.*)\"$/i) {
+            # Use 5th and 4th fields (country name-country code) as key, pushing the from-to addresses to an array
+            push(@{$locations{"$4 - $3"}}, "$1-$2");
+        } else {
+            print "Warning: unparsable line: $line";
+        }
+    }
+    print " Done!\n\n";
+    $| = $buffering;
+}
+
+sub list_location_networks ($) {
+    my $location = shift;
+    
+    die "location $location not found, please provide exact location (Country - Code) as appears in the list to retrieve networks per location.\n"
+    if (!defined $locations{$location});
+
+    print "Networks residing in location '$location':\n";
+    
+    foreach (@{$locations{$location}}) {
+        print "\t$_\n";
+    }
+    print "\n";
+}
+
+sub list_locations ($) {
+    my $location = shift || '';
+    load_locations();
+
+    print "Listing locations:\n\n";
+
+    foreach (sort keys %locations) {
+        if ($location eq '') {
+            printf("\t%-70s%-40s\n", $_, '('. scalar @{$locations{$_}} .' networks)');
+        } elsif ($_ =~ /$location/) {
+            printf("\t%-70s%-40s\n", $_, '('. scalar @{$locations{$_}} .' networks)');
+        }
+    }
+    print "\n";
+
+    if ($location ne '') {
+        list_location_networks($location);
+    }
+}
+
+sub list_server_protections () {
+    my $protections = get_server_protections();
+
+    foreach my $prot (sort keys %{$protections}) {
+        print "\nServer Protection Policy: $prot ($protections->{$prot}->{State})\n";
+        
+        printf("\t%-40s%-20s\n", "IP Address:", "$protections->{$prot}->{IPAddress}");
+        printf("\t%-40s%-20s\n", "Server Cracking Profile:", "$protections->{$prot}->{IPSProfile}");
+        printf("\t%-40s%-20s\n", "HTTP Mitigator Profile:", "$protections->{$prot}->{HttpProfile}");
+    }
+    print "\n";
+}
+
+sub update_policies() {
+    if ($batch != 0) { return }
+    print "Updating policies...\n";
+    $soap_obj->uri('radware.Security.ActivateConfiguration');
+    $soap_req = $soap_obj->update_ActivePolicies();
+    my $response = $soap_req->result;
+}
+
+sub add_server_protection ($$@) {
+    my ($name, $address, @args) = @_;
+
+    single_print "Adding Server Protection policy '$name' for server '$address'.\n";
+
+    # Parse some arguments real quick!
+    my $opts = {};
+    foreach (@args) {
+        my ($opt, $arg) = split('=', $_);
+        $opts->{$opt} = $arg || '' if (defined $opt);
+    }
+
+    # Prepare the policy envelope
+    my $policy = {
+        Name        => $name,
+        IPSProfile  => $opts->{cracking} || '',
+        IPAddress   => $address,
+        HttpProfile => $opts->{http}     || '',
+        State       => 'active'
+    };
+
+    my $active_prots = get_server_protections();
+
+    die ("A protection policy named '$name' already exists.\n") if (defined $active_prots->{$name});
+
+    $soap_obj->uri('radware.Security.ServerProtection');
+    $soap_req = $soap_obj->create_IDSServerTable($policy);
+    my $response = $soap_req->result;
+
+    single_print "Server Protections policy '$name' created successfully.\n";
+
+    single_exit(0);
+}
+
+sub delete_server_protection ($) {
+    my $name = shift;
+
+    single_print "Deleting Server Protection policy '$name'.\n";
+
+    my $active_prots = get_server_protections();
+
+    die ("A protection policy named '$name' doesn't exists.\n") if (not defined $active_prots->{$name});
+
+    $soap_obj->uri('radware.Security.ServerProtection');
+    $soap_req = $soap_obj->delete_IDSServerTable($name);
+    my $response = $soap_req->result;
+
+    single_print "Server Protections policy '$name' deleted successfully.\n";
+
+    single_exit(0);
+}
+
+sub add_network (@) {
+    my ($name, $network_object, $networks) = @_;
+    
+    my $netdetails = parse_netobject($network_object);
+    
+    single_print "Adding network object '$network_object' to network class '$name'.\n";
+    
+    $networks = defined $networks ? $networks : get_networks() ;
+    
+    # Prepare the network object
+    my $net = {
+        'Mask' => $netdetails->{Mask},
+        'Address' => $netdetails->{Address},
+        'Index' => '0',
+        'FromIp' => $netdetails->{FromIp},
+        'Mode' => $netdetails->{Mode},
+        'ToIp' => $netdetails->{ToIp},
+        'Name' => $name,
+    };
+    
+    if (defined $networks->{$name}) {
+        # Grab the highest index for that network
+        $net->{Index} = (reverse sort { $$a{Index} <=> $$b{Index} } @{$networks->{$name}})[0]->{Index} + 1;
+    } 
+    push(@{$networks->{$net->{Name}}}, $net);
+    
+    $soap_obj->uri('radware.Classes.Networks');
+    $soap_req = $soap_obj->create_Network($net);
+    my $response = $soap_req->result;
+
+    update_policies();
+    single_print "Network " . (defined $networks->{$name} ? "updated" : "created") . " successfully.\n";
+
+    single_exit(0);
+}
+
+sub add_network_location (@) {
+    my ($name, $location) = @_;
+    load_locations(); 
+
+    die "location '$location' not found, please provide exact location (Country - Code) as appears in the list to retrieve networks per location.\n"
+    if (!defined $locations{$location}); 
+
+    my $network_objects = scalar @{$locations{$location}};
+
+    $batch = 1;
+    my $networks = get_networks();
+    if ($network_objects <= 256) {
+        print "Creating network object '$name' from $network_objects networks:\n";
+        foreach (@{$locations{$location}}) {
+         add_network($name, $_, $networks);
+         print "\tNetwork $_ added.\n";
+        }
+    } else {
+        print "Creating network object with '$name' prefix from $network_objects networks:\n";
+        my $counter = 0;
+        my $name_full;
+        my %names_list;
+        foreach (@{$locations{$location}}) {
+            $name_full = "$name" . '-part-' . (int($counter/256)+1);
+            $names_list{$name_full} = '';
+            add_network($name_full, $_, $networks);
+            print "\t($name_full): Network object $_ added.\n";
+            $counter++;
+        }
+        print "\nResulting network classes:\n";
+        foreach (keys %names_list) {
+            print "\t'$_'\n";
+        }
+    }
+    $batch = 0;
+    print "\n";
+    
+    update_policies();
+    print "Network object(s) created successfully.\n";
+}
+
+sub delete_network (@) {
+    my $name = shift;
+    my $index = shift;
+        
+    my $networks = get_networks();
+    
+    unless (defined $networks->{$name}) {
+        single_print "A network with that name was not found. Please try creating it first.\n";
+        single_exit(1);
+    }
+
+    my $net;
+
+    if (defined $index) {
+        single_print "Deleting network object from network class '$name' (index $index).\n";
+
+        # Prepare the network object
+        $net = {
+            'Index' => $index,
+            'Name' => $name,
+        };
+
+        $soap_obj->uri('radware.Classes.Networks');
+        $soap_req = $soap_obj->delete_Network($net);
+        my $response = $soap_req->result;
+    
+    } else {
+        single_print "Deleting network class '$name'.\n";
+        
+        foreach (@{$networks->{$name}}) {
+            # Prepare the network object
+            $net = {
+                'Index' => $_->{Index},
+                'Name' => $name,
+            };
+    
+            $soap_obj->uri('radware.Classes.Networks');
+            $soap_req = $soap_obj->delete_Network($net);
+            my $response = $soap_req->result;
+        }
+    }
+
+    update_policies();
+    single_print 'Network ' . (defined $index ? 'object' : 'class') . " deleted successfully.\n";
+
+    single_exit(0);
+}
+
+sub move_network (@) {
+    my ($source_class, $network_object, $dest_class) = @_;
+
+    my $networks = get_networks();
+
+    die("A network with the source and/or destination name was not found.\n")
+        unless (defined $networks->{$source_class} and defined $networks->{$dest_class});
+
+    my $index = get_index($networks->{$source_class}, $network_object);
+    unless ($index != -1) {
+        die("Network object '$network_object' not found within network class '$source_class'.\n");
+    }
+
+    print "Moving address '$network_object' from network '$source_class' (index $index) to network '$dest_class'.\n";
+    
+    $batch = 1;
+    add_network($dest_class, $network_object);
+    delete_network($source_class, $index); 
+    $batch = 0;
+
+    update_policies();
+    print "Network address moved successfully.\n";
+
+    single_exit(0);
+}
+
+sub add_blacklist ($) {
+    my $name = shift;
+
+    my $networks = get_networks();
+    my $blacklists = get_blacklists();
+    
+    die("A network with that name was not found. Please try creating it first.\n") 
+        unless (defined $networks->{$name});
+
+    die("A Blacklist policy with that name already exists.\n")
+        if (defined $blacklists->{$name}); 
+
+    single_print "Creating Blacklist policy '$name'.\n";
+
+    # Prepare the network object
+    my $bl = {
+        'Name' => $name,
+        'Sourcenetwork' => $name,
+        'Srcnetwork' => $name,
+        'Direction' => 'one-direct',
+        'State' => 'active',
+    };
+    
+    $soap_obj->uri('radware.Security.AccessLists');
+    $soap_req = $soap_obj->create_BlackList($bl);
+    my $response = $soap_req->result;
+    
+    update_policies();
+    single_print "Blacklist policy created successfully.\n";
+
+    single_exit(0);
+}
+
+sub delete_blacklist ($) {
+    my $name = shift;
+
+    my $networks = get_networks();
+    my $blacklists = get_blacklists();
+    
+    die("A network with that name was not found. Please try creating it first.\n") 
+        unless (defined $networks->{$name});
+
+    die("A Blacklist policy with that name doesn't exists.\n")
+        unless (defined $blacklists->{$name}); 
+
+    single_print "Removing Blacklist policy '$name'.\n";
+
+    # Prepare the network object
+    my $bl = {
+        'Name' => $name,
+        'Sourcenetwork' => $name,
+        'State' => 'active',
+    };
+    
+    $soap_obj->uri('radware.Security.AccessLists');
+    $soap_req = $soap_obj->delete_BlackList($bl);
+    my $response = $soap_req->result;
+    
+    update_policies();
+    single_print "Blacklist policy removed successfully.\n";
+
+    single_exit(0);
+}
+
+sub add_whitelist ($) {
+    my $name = shift;
+
+    my $networks = get_networks();
+    my $whitelists = get_whitelists();
+    
+    die("A network with that name was not found. Please try creating it first.\n") 
+        unless (defined $networks->{$name});
+
+    die("A Whitelist policy with that name already exists.\n")
+        if (defined $whitelists->{$name}); 
+
+    single_print "Creating Whitelist policy '$name'.\n";
+
+    # Prepare the network object
+    my $wl = {
+        'Name' => $name, 
+        'Sourcenetwork' => $name,
+        'Srcnetwork' => $name,
+        'State' => 'active',
+    };
+    
+    $soap_obj->uri('radware.Security.AccessLists');
+    $soap_req = $soap_obj->create_WhiteList($wl);
+    my $response = $soap_req->result;
+    
+    update_policies();
+    single_print "Whitelist policy created successfully.\n";
+
+    single_exit(0);
+}
+
+sub delete_whitelist ($) {
+    my $name = shift;
+
+    my $networks = get_networks();
+    my $whitelists = get_whitelists();
+    
+    die("A network with that name was not found. Please try creating it first.\n") 
+        unless (defined $networks->{$name});
+
+    die("A Whitelist policy with that name doesn't exists.\n")
+        unless (defined $whitelists->{$name}); 
+
+    single_print "Removing Whitelist policy '$name'.\n";
+
+    # Prepare the network object
+    my $wl = {
+        'Name' => $name,
+        'Sourcenetwork' => $name,
+        'State' => 'active',
+    };
+    
+    $soap_obj->uri('radware.Security.AccessLists');
+    $soap_req = $soap_obj->delete_WhiteList($wl);
+    my $response = $soap_req->result;
+    
+    update_policies();
+    single_print "Whitelist policy removed successfully.\n";
+
+    single_exit(0);
+}
+
+
+sub usage {
+    my $id_string='$Id: dp-util 103 2010-11-22 18:23:19Z yuri $';
+    print <<__EOHELP;
+DP-util v0.3 (c) Radware Inc.
+Alex Behar, Yuri Gushin 2010
+$id_string
+
+This utility allows the remote configuration of commonly 
+used modules on the Radware DefensePro.
+
+
+Usage:
+
+$0 [OPERATION]... [CLASS]... [ARGS]...
+
+Operations:
+    list    Lists all objects for a certain class
+    add     Add new objects to that class
+    delete  Remove objects/classes
+    move    Move a network object from one network class to another
+
+Classes:
+    blacklist           Blacklist policies
+    whitelist           Whitelist policies
+    network             Network classes and contained addresses (objects)
+    server-protections  Server Protection policies
+    locations           Locations in local GeoIP database (list only)
+
+
+Please refer to the README for more information.
+
+__EOHELP
+
+    exit(1);
+}
+
+unless (scalar @ARGV >= 2) { usage() ; } 
+
+# This sucks, but proper switch is implemented only in 5.10 and few people would be running that
+if ($ARGV[0] =~ /list|ls/) {
+    unless (scalar @ARGV == 2 or scalar @ARGV == 3) { die "Wrong number of parameters. Please see -h for more info.\n" }
+    if ($ARGV[1] =~ /blacklist|^bl$/) {
+        list_blacklists();
+    } elsif ($ARGV[1] =~ /whitelist|^wl$/) {
+        list_whitelists();
+    } elsif ($ARGV[1] =~ /^net(works)?/) {
+        my $networks = get_networks();
+        foreach(keys %{$networks}) { 
+            print "Network: $_\n";
+            print_network($networks->{$_});
+            print "\n";
+        }
+    } elsif ($ARGV[1] =~ /^sp|server-protections/) {
+        list_server_protections();
+    } elsif ($ARGV[1] =~ /locations/) {
+        list_locations($ARGV[2]);
+    } else { die "Unknown parameter. See -h for more info.\n" }
+
+} elsif ($ARGV[0] eq 'add') {
+    die("Not enough parameters. Please see -h for more info.\n") 
+        unless (scalar @ARGV >= 3);
+    if ($ARGV[1] =~ /^net(work)?/) {
+        die("Not enough parameters. Please see -h for more info.\n")
+            unless (scalar @ARGV == 4);
+            if ($ARGV[3] =~ /[^0-9-\/\.:a-f]/i) {
+                add_network_location($ARGV[2], $ARGV[3]);
+            } else {
+                add_network($ARGV[2], $ARGV[3]);
+            }
+    } elsif ($ARGV[1] =~ /^blacklist|^bl$/) {
+        die("Not enough parameters. Please see -h for more info.\n")
+            unless (scalar @ARGV == 3);
+        add_blacklist($ARGV[2]);
+    } elsif ($ARGV[1] =~ /^whitelist|^wl$/) {
+        die("Not enough parameters. Please see -h for more info.\n")
+            unless (scalar @ARGV == 3);
+        add_whitelist($ARGV[2]);
+    } elsif ($ARGV[1] =~ /^sp|server-protections/) {
+        die("Not enough parameters. Please see -h for more info.\n")
+            unless (scalar @ARGV >= 4);
+        
+        my @extra_args;
+        push(@extra_args, $ARGV[$_]) foreach (4 .. ((scalar @ARGV) - 1));
+
+        add_server_protection($ARGV[2], $ARGV[3], @extra_args);
+    }
+} elsif ($ARGV[0] =~ /delete|del/) {
+    unless (scalar @ARGV >= 3) { die "Not enough parameters. Please see -h for more info.\n" }
+    if ($ARGV[1] =~ /^net(works)?/) {
+        unless (scalar @ARGV <= 4) { die "Not enough parameters. Please see -h for more info.\n" }
+        delete_network($ARGV[2], $ARGV[3]);
+    } elsif ($ARGV[1] =~ /blacklist|^bl$/) {
+        unless (scalar @ARGV == 3) { die "Not enough parameters. Please see -h for more info.\n" }
+        delete_blacklist($ARGV[2]);
+    } elsif ($ARGV[1] =~ /whitelist|^wl$/) {
+        unless (scalar @ARGV == 3) { die "Not enough parameters. Please see -h for more info.\n" }
+        delete_whitelist($ARGV[2]);
+    } elsif ($ARGV[1] =~ /^sp|server-protections/) {
+        die("Not enough parameters. Please see -h for more info.\n")
+            unless (scalar @ARGV == 3);
+        delete_server_protection($ARGV[2]);
+    }
+} elsif ($ARGV[0] =~ /move|mv/) {
+    unless (scalar @ARGV >= 3) { die "Not enough parameters. Please see -h for more info.\n" }
+    if ($ARGV[1] =~ /^net(work_object)?/) {
+        unless (scalar @ARGV == 5) { die "Not enough parameters. Please see -h for more info.\n" }
+        move_network($ARGV[2], $ARGV[3], $ARGV[4]);
+    }
+}
+
+exit(0);
