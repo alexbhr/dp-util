@@ -32,7 +32,6 @@
 #
 # Alex Behar <alexbr@radware.com>
 # Yuri Gushin <yurig@radware.com>
-# $Id: dp-util 103 2010-11-22 18:23:19Z yuri $
 
 use warnings;
 use strict;
@@ -439,7 +438,7 @@ sub add_network_location (@) {
             $counter++;
         }
         print "\nResulting network classes:\n";
-        foreach (keys %names_list) {
+        foreach (sort keys %names_list) {
             print "\t'$_'\n";
         }
     }
@@ -653,11 +652,9 @@ sub delete_whitelist ($) {
 
 
 sub usage {
-    my $id_string='$Id: dp-util 103 2010-11-22 18:23:19Z yuri $';
     print <<__EOHELP;
 DP-util v0.3 (c) Radware Inc.
 Alex Behar, Yuri Gushin 2010
-$id_string
 
 This utility allows the remote configuration of commonly 
 used modules on the Radware DefensePro.
@@ -699,10 +696,17 @@ if ($ARGV[0] =~ /list|ls/) {
         list_whitelists();
     } elsif ($ARGV[1] =~ /^net(works)?/) {
         my $networks = get_networks();
+        my $netname = $ARGV[2] || '';
         foreach(keys %{$networks}) { 
-            print "Network: $_\n";
-            print_network($networks->{$_});
-            print "\n";
+            if ($netname eq '') {
+                print "Network: $_\n";
+                print_network($networks->{$_});
+                print "\n";
+            } elsif ($_ =~ /$netname/i) {
+                print "Network: $_\n";
+                print_network($networks->{$_});
+                print "\n";
+            }
         }
     } elsif ($ARGV[1] =~ /^sp|server-protections/) {
         list_server_protections();

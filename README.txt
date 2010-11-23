@@ -10,6 +10,7 @@ Functionality
     - Network classes
         - Add/delete network classes (using IP range/mask/CIDR or GeoIP location)
         - List network classes
+        - Search network classes by name
         - Move network objects between classes
     - Whitelist/Blacklist policies
         - Add whitelist/blacklist policies (using network classes)
@@ -18,6 +19,7 @@ Functionality
         - Add/list/delete server protection policies 
     - Locations (GeoIP)
         - List locations and network objects belonging to locations
+        - Search for locations by name
     - Support IPv4 and IPv6
 
 
@@ -112,6 +114,10 @@ Network: badguys
          Mask: 10.1.2.0/255.255.255.0           index: 0
         Range: 10.1.3.3-10.1.3.5                index: 1
          Mask: 10.1.4.0/255.255.255.252         index: 2
+...
+
+Search for network classes containing "bad"
+# dp-util ls net bad
 
 Remove a network object from a network class (index 2):
 # dp-util del net badguys 2
