@@ -1,3 +1,2 @@
-binaries/linux/*
-binaries/osx/*
-binaries/windows/*
+packages/dp-util*
+

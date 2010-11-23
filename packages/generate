@@ -1,0 +1,16 @@
+#!/bin/bash
+
+rm dp-util.tgz dp-util-binary.zip &>/dev/null
+
+echo "Creating source package:"
+tar -C ../ -czf dp-util.tgz LICENSE.txt README.txt SOURCE.txt dp-util
+echo "Done!"
+
+echo -e "\nCreating binary package:"
+zip -9 -j dp-util-binary.zip ../README.txt ../LICENSE.txt
+WD=`pwd`
+cd ..
+zip -9 $WD/dp-util-binary.zip binaries/windows/* binaries/linux/* binaries/osx/*
+cd $WD
+echo "Done!"
+
