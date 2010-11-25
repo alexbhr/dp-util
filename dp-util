@@ -223,29 +223,44 @@ sub print_network ($) {
     }
 }
 
-sub list_blacklists () {
-    my $black_lists = get_blacklists();
+sub list_networks ($) {
+    my $netname = shift || '';
     my $networks = get_networks();
     
-    foreach my $bl (keys %{$black_lists}) {
-        my $bl_net = $networks->{$bl};
-        print "Blacklist policy: $bl\n";
-        print_network($bl_net);
+    print 'Network classes' . ($netname eq '' ? ':' : " matching '$netname':") . "\n";
+    foreach(sort keys %{$networks}) { 
+        if ($netname eq '') {
+            print "\t$_\n";
+        } elsif ($_ =~ /$netname/i) {
+            print "\nNetwork: $_\n";
+            print_network($networks->{$_});
+        }
+    }
+    print "\n";
+}
+
+sub list_blacklists () {
+    my $black_lists = get_blacklists();
+   
+    print "Blacklist policies:\n";
+    foreach my $bl (sort keys %{$black_lists}) {
+        print "\t$bl\n";
     }
 }
 
 sub list_whitelists () {
     my $white_lists = get_whitelists();
-    my $networks = get_networks();
-    foreach my $wl (keys %{$white_lists}) {
-        my $wl_net = $networks->{$wl};
-        print "Whitelist policy: $wl\n";
-        print_network($wl_net);
+    
+    print "Whitelist policies:\n";
+    foreach my $wl (sort keys %{$white_lists}) {
+        print "\t$wl\n";
     }
 }
 
 sub load_locations () {
     my $buffering = $|;
+    
+    if (%locations) { return }
     
     $| = 1;
     print "Reading GeoIP DB... ";
@@ -341,10 +356,6 @@ sub add_server_protection ($$@) {
         State       => 'active'
     };
 
-    my $active_prots = get_server_protections();
-
-    die ("A protection policy named '$name' already exists.\n") if (defined $active_prots->{$name});
-
     $soap_obj->uri('radware.Security.ServerProtection');
     $soap_req = $soap_obj->create_IDSServerTable($policy);
     my $response = $soap_req->result;
@@ -358,10 +369,6 @@ sub delete_server_protection ($) {
     my $name = shift;
 
     single_print "Deleting Server Protection policy '$name'.\n";
-
-    my $active_prots = get_server_protections();
-
-    die ("A protection policy named '$name' doesn't exists.\n") if (not defined $active_prots->{$name});
 
     $soap_obj->uri('radware.Security.ServerProtection');
     $soap_req = $soap_obj->delete_IDSServerTable($name);
@@ -408,15 +415,27 @@ sub add_network (@) {
     single_exit(0);
 }
 
+sub add_network_location (@);
 sub add_network_location (@) {
     my ($name, $location) = @_;
     load_locations(); 
 
-    die "location '$location' not found, please provide exact location (Country - Code) as appears in the list to retrieve networks per location.\n"
-    if (!defined $locations{$location}); 
+    die "location '$location' not found, please provide exact location (Country Name - Code) as appears in the list to retrieve networks per location.\n"
+    if (!defined $locations{$location} and $location ne 'all'); 
 
+    # Support the magic 'all' location, creating networkname-CC-X, where CC = Country Code
+    if ($location eq 'all') {
+        foreach (sort keys %locations) {
+            if ($_ =~ /^(.*)-\s([\w]{2})$/) {
+                print "$1:\n";
+                add_network_location("$name-$2", $_);
+                print "\n";
+            }
+        }     
+    }
+    
     my $network_objects = scalar @{$locations{$location}};
-
+    
     $batch = 1;
     my $networks = get_networks();
     if ($network_objects <= 256) {
@@ -431,7 +450,7 @@ sub add_network_location (@) {
         my $name_full;
         my %names_list;
         foreach (@{$locations{$location}}) {
-            $name_full = "$name" . '-part-' . (int($counter/256)+1);
+            $name_full = "$name" . '-' . (int($counter/256)+1);
             $names_list{$name_full} = '';
             add_network($name_full, $_, $networks);
             print "\t($name_full): Network object $_ added.\n";
@@ -453,13 +472,6 @@ sub delete_network (@) {
     my $name = shift;
     my $index = shift;
         
-    my $networks = get_networks();
-    
-    unless (defined $networks->{$name}) {
-        single_print "A network with that name was not found. Please try creating it first.\n";
-        single_exit(1);
-    }
-
     my $net;
 
     if (defined $index) {
@@ -477,6 +489,7 @@ sub delete_network (@) {
     
     } else {
         single_print "Deleting network class '$name'.\n";
+        my $networks = get_networks();
         
         foreach (@{$networks->{$name}}) {
             # Prepare the network object
@@ -526,21 +539,11 @@ sub move_network (@) {
 sub add_blacklist ($) {
     my $name = shift;
 
-    my $networks = get_networks();
-    my $blacklists = get_blacklists();
-    
-    die("A network with that name was not found. Please try creating it first.\n") 
-        unless (defined $networks->{$name});
-
-    die("A Blacklist policy with that name already exists.\n")
-        if (defined $blacklists->{$name}); 
-
     single_print "Creating Blacklist policy '$name'.\n";
 
     # Prepare the network object
     my $bl = {
         'Name' => $name,
-        'Sourcenetwork' => $name,
         'Srcnetwork' => $name,
         'Direction' => 'one-direct',
         'State' => 'active',
@@ -559,21 +562,11 @@ sub add_blacklist ($) {
 sub delete_blacklist ($) {
     my $name = shift;
 
-    my $networks = get_networks();
-    my $blacklists = get_blacklists();
-    
-    die("A network with that name was not found. Please try creating it first.\n") 
-        unless (defined $networks->{$name});
-
-    die("A Blacklist policy with that name doesn't exists.\n")
-        unless (defined $blacklists->{$name}); 
-
     single_print "Removing Blacklist policy '$name'.\n";
 
     # Prepare the network object
     my $bl = {
         'Name' => $name,
-        'Sourcenetwork' => $name,
         'State' => 'active',
     };
     
@@ -590,22 +583,13 @@ sub delete_blacklist ($) {
 sub add_whitelist ($) {
     my $name = shift;
 
-    my $networks = get_networks();
-    my $whitelists = get_whitelists();
-    
-    die("A network with that name was not found. Please try creating it first.\n") 
-        unless (defined $networks->{$name});
-
-    die("A Whitelist policy with that name already exists.\n")
-        if (defined $whitelists->{$name}); 
-
     single_print "Creating Whitelist policy '$name'.\n";
 
     # Prepare the network object
     my $wl = {
         'Name' => $name, 
-        'Sourcenetwork' => $name,
         'Srcnetwork' => $name,
+        'Direction' => 'bi-direct',
         'State' => 'active',
     };
     
@@ -622,21 +606,11 @@ sub add_whitelist ($) {
 sub delete_whitelist ($) {
     my $name = shift;
 
-    my $networks = get_networks();
-    my $whitelists = get_whitelists();
-    
-    die("A network with that name was not found. Please try creating it first.\n") 
-        unless (defined $networks->{$name});
-
-    die("A Whitelist policy with that name doesn't exists.\n")
-        unless (defined $whitelists->{$name}); 
-
     single_print "Removing Whitelist policy '$name'.\n";
 
     # Prepare the network object
     my $wl = {
         'Name' => $name,
-        'Sourcenetwork' => $name,
         'State' => 'active',
     };
     
@@ -695,19 +669,7 @@ if ($ARGV[0] =~ /list|ls/) {
     } elsif ($ARGV[1] =~ /whitelist|^wl$/) {
         list_whitelists();
     } elsif ($ARGV[1] =~ /^net(works)?/) {
-        my $networks = get_networks();
-        my $netname = $ARGV[2] || '';
-        foreach(keys %{$networks}) { 
-            if ($netname eq '') {
-                print "Network: $_\n";
-                print_network($networks->{$_});
-                print "\n";
-            } elsif ($_ =~ /$netname/i) {
-                print "Network: $_\n";
-                print_network($networks->{$_});
-                print "\n";
-            }
-        }
+        list_networks($ARGV[2]);
     } elsif ($ARGV[1] =~ /^sp|server-protections/) {
         list_server_protections();
     } elsif ($ARGV[1] =~ /locations/) {
@@ -741,7 +703,7 @@ if ($ARGV[0] =~ /list|ls/) {
         push(@extra_args, $ARGV[$_]) foreach (4 .. ((scalar @ARGV) - 1));
 
         add_server_protection($ARGV[2], $ARGV[3], @extra_args);
-    }
+    } else { die "Unknown parameter. See -h for more info.\n" }
 } elsif ($ARGV[0] =~ /delete|del/) {
     unless (scalar @ARGV >= 3) { die "Not enough parameters. Please see -h for more info.\n" }
     if ($ARGV[1] =~ /^net(works)?/) {
@@ -757,13 +719,13 @@ if ($ARGV[0] =~ /list|ls/) {
         die("Not enough parameters. Please see -h for more info.\n")
             unless (scalar @ARGV == 3);
         delete_server_protection($ARGV[2]);
-    }
+    } else { die "Unknown parameter. See -h for more info.\n" }
 } elsif ($ARGV[0] =~ /move|mv/) {
     unless (scalar @ARGV >= 3) { die "Not enough parameters. Please see -h for more info.\n" }
     if ($ARGV[1] =~ /^net(work_object)?/) {
         unless (scalar @ARGV == 5) { die "Not enough parameters. Please see -h for more info.\n" }
         move_network($ARGV[2], $ARGV[3], $ARGV[4]);
-    }
+    } else { die "Unknown parameter. See -h for more info.\n" }
 }
 
 exit(0);

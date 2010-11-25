@@ -80,6 +80,8 @@ Windows:
 
 DefensePro setup
 ================
+DefensePro version 5.10 or later must be used with this tool.
+
 dp-util requires DefensePro to have the web-services feature turned on.
 The use of GeoIP requires tuning the network-objects per class parameter.
 
@@ -108,16 +110,15 @@ To create a new Whitelist or Blacklist policy, first create a network class (usi
 Then, create the Blacklist policy:
 # dp-util add bl badguys
 
-List network classes & objects:
+List network classes:
 # dp-util ls net
+
+List network classes and the belonging objects matching to 'bad':
+# dp-util ls net bad
 Network: badguys 
          Mask: 10.1.2.0/255.255.255.0           index: 0
         Range: 10.1.3.3-10.1.3.5                index: 1
          Mask: 10.1.4.0/255.255.255.252         index: 2
-...
-
-Search for network classes containing "bad"
-# dp-util ls net bad
 
 Remove a network object from a network class (index 2):
 # dp-util del net badguys 2
@@ -160,7 +161,7 @@ This results with 4 different network objects (ESnet-part-1, ESnet-part-2, ..) w
 DefensePro capabilities with GeoIP
 ==================================
 
-DefensePro (version 5.10) supports up to 5000 different network objects in the blacklist/whitelist in total.
+DefensePro supports up to 5000 different network objects in the blacklist/whitelist in total.
 This means that the total number of network objects, out of all network classes assigned with a whitelist
 or blacklist policy, cannot exceed that.
 It is advised to list the relevant GeoIP location and see the number of networks it contains before adding
