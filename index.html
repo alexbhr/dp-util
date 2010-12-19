@@ -33,7 +33,7 @@
 <body>
   <script language="JavaScript">
     <!--
-        var repository_url = 'github.com/' + (/([^\.]+)\.github\.com/.exec(document.location.hostname) || 'yuri-gushin') + '/dp-util';
+        var repository_url = 'github.com/' + (/([^\.]+)\.github\.com/.exec('yuri-gushin.github.com')[1] || 'yuri-gushin') + '/dp-util';
         var git_url = 'git://' + repository_url;
         function print_url () {
             document.write(repository_url);
