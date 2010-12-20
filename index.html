@@ -33,7 +33,7 @@
 <body>
   <script language="JavaScript">
     <!--
-        var repository_url = 'github.com/' + (/([^\.]+)\.github\.com/.exec('yuri-gushin.github.com')[1] || 'yuri-gushin') + '/dp-util';
+        var repository_url = 'github.com/' + (/([^\.]+)\.github\.com/.exec(document.location.hostname)[1] || 'yuri-gushin') + '/dp-util';
         var git_url = 'git://' + repository_url;
         function print_url () {
             document.write(repository_url);
@@ -67,7 +67,10 @@
     </p>
     <br/>
     <h2>Authors</h2>
-    <p>Alex Behar (alex@ecl-labs.org)<br/>Yuri Gushin (yuri@ecl-labs.org)<br/><br/></p>
+    <p>Alex Behar (alex@ecl-labs.org)
+<br/>Yuri Gushin (yuri@ecl-labs.org)
+<br/>
+<br/></p>
 
 
     <div class="footer">
